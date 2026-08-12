@@ -1,0 +1,37 @@
+name: Sync sheet data
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch and validate sheet data
+        run: python3 sync.py
+
+      # Runs even when a sheet failed (partial success still publishes the
+      # valid file); the job stays red so the failure is visible.
+      - name: Commit updated data
+        if: ${{ !cancelled() }}
+        run: |
+          if git diff --quiet progress.csv reach.csv; then
+            echo "No data changes."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add progress.csv reach.csv
+          git commit -m "data: sync from Google Sheets"
+          git push

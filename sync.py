@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Fetch the published Google Sheet CSVs, validate them against the frozen
-contract (see README.md), and write progress.csv / reach.csv.
+"""Fetch the published Google Sheet CSVs, validate each against its frozen
+contract (see README.md), and write progress.csv / reach.csv / events.csv.
 
 Stdlib only—runs on a bare GitHub Actions Python with no installs.
 
@@ -29,18 +29,24 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 FETCH_TIMEOUT_S = 60
 FETCH_ATTEMPTS = 3
-COLUMNS = ("category", "female", "male", "others")
-GENDERS = COLUMNS[1:]
 
-DOC = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQyzECunprHBFcHi_Xsd64BwXchQlMTJT0IAbZXcMHPPtLgIY5Vh6eHzrg_r9gLohc1-9qqvnmoGNOc/pub"
+COUNT_COLUMNS = ("category", "female", "male", "others")
+GENDERS = COUNT_COLUMNS[1:]
+EVENT_COLUMNS = ("date", "time", "title", "modality", "venue", "city", "host", "register_url", "notes")
+MODALITIES = ("Webinar", "In-person", "Hybrid", "Self-paced")
+
+COUNTS_DOC = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQyzECunprHBFcHi_Xsd64BwXchQlMTJT0IAbZXcMHPPtLgIY5Vh6eHzrg_r9gLohc1-9qqvnmoGNOc/pub"
+EVENTS_DOC = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTb9QKPZR9UqYA1cAI-MVZsvQAE4ybnLR4KvfVHtLtRDE3-ZFJa0Rl0mTJk_nb32cRP2hlxEdq4gStj/pub"
+# (filename, contract columns, row validator, source URL)
 SHEETS = (
-    ("progress.csv", f"{DOC}?gid=0&single=true&output=csv"),
-    ("reach.csv", f"{DOC}?gid=1472833579&single=true&output=csv"),
+    ("progress.csv", COUNT_COLUMNS, "counts", f"{COUNTS_DOC}?gid=0&single=true&output=csv"),
+    ("reach.csv", COUNT_COLUMNS, "counts", f"{COUNTS_DOC}?gid=1472833579&single=true&output=csv"),
+    ("events.csv", EVENT_COLUMNS, "events", f"{EVENTS_DOC}?gid=0&single=true&output=csv"),
 )
 
 
@@ -78,21 +84,35 @@ def fetch(url: str) -> str:
     raise RuntimeError("unreachable")
 
 
-def validate(records: list[list[str]]) -> list[str]:
-    """Return contract violations (empty list = valid)."""
+def header_problems(records: list[list[str]], columns: tuple[str, ...]) -> list[str]:
     if not records:
         return ["sheet returned no rows"]
     header = [h.strip().lower() for h in records[0]]
-    missing = [c for c in COLUMNS if c not in header]
+    missing = [c for c in columns if c not in header]
     if missing:
         return [f"header is missing the {', '.join(missing)} column(s), got: {', '.join(header)}"]
-    problems: list[str] = []
-    total = 0
+    return []
+
+
+def rows(records: list[list[str]]):
+    """Yield (line_no, row-dict) per record; None for width-mismatched rows."""
+    header = [h.strip().lower() for h in records[0]]
     for line_no, record in enumerate(records[1:], start=2):
         if len(record) != len(header):
-            problems.append(f"line {line_no}: expected {len(header)} columns, got {len(record)}")
+            yield line_no, None
+        else:
+            yield line_no, {name: field.strip() for name, field in zip(header, record)}
+
+
+def validate_counts(records: list[list[str]]) -> list[str]:
+    """Beneficiary-count contract violations (empty list = valid)."""
+    if problems := header_problems(records, COUNT_COLUMNS):
+        return problems
+    total = 0
+    for line_no, r in rows(records):
+        if r is None:
+            problems.append(f"line {line_no}: expected {len(records[0])} columns, got a different count")
             continue
-        r = {name: field.strip() for name, field in zip(header, record)}
         if not r["category"]:
             problems.append(f"line {line_no}: missing category")
         for g in GENDERS:
@@ -105,15 +125,43 @@ def validate(records: list[list[str]]) -> list[str]:
     return problems
 
 
-def canonical(records: list[list[str]]) -> str:
+def validate_events(records: list[list[str]]) -> list[str]:
+    """Event-schedule contract violations, mirroring join.html's row rules."""
+    if problems := header_problems(records, EVENT_COLUMNS):
+        return problems
+    for line_no, r in rows(records):
+        if r is None:
+            problems.append(f"line {line_no}: expected {len(records[0])} columns, got a different count")
+            continue
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["date"]) or not valid_date(r["date"]):
+            problems.append(f'line {line_no}: bad date "{r["date"]}" (need YYYY-MM-DD)')
+        if r["modality"] not in MODALITIES:
+            problems.append(f'line {line_no}: bad modality "{r["modality"]}" (need {" | ".join(MODALITIES)})')
+        if not r["title"]:
+            problems.append(f"line {line_no}: missing title")
+    return problems
+
+
+def valid_date(s: str) -> bool:
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        return False
+    return True
+
+
+VALIDATORS = {"counts": validate_counts, "events": validate_events}
+
+
+def canonical(records: list[list[str]], columns: tuple[str, ...]) -> str:
     """Project to exactly the contract columns, in contract order."""
     header = [h.strip().lower() for h in records[0]]
-    at = {c: header.index(c) for c in COLUMNS}
+    at = {c: header.index(c) for c in columns}
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(COLUMNS)
+    writer.writerow(columns)
     for record in records[1:]:
-        writer.writerow([record[at[c]].strip() for c in COLUMNS])
+        writer.writerow([record[at[c]].strip() for c in columns])
     return out.getvalue()
 
 
@@ -122,7 +170,7 @@ def main() -> int:
     meta = load_meta(root / META)
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     exit_code = 0
-    for filename, url in SHEETS:
+    for filename, columns, contract, url in SHEETS:
         try:
             fetched = fetch(url)
         except (urllib.error.URLError, TimeoutError, OSError) as e:
@@ -130,7 +178,7 @@ def main() -> int:
             exit_code = max(exit_code, 69)
             continue
         records = [r for r in csv.reader(io.StringIO(fetched)) if any(f.strip() for f in r)]
-        problems = validate(records)
+        problems = VALIDATORS[contract](records)
         if problems:
             for p in problems:
                 info(f"error: {filename}: {p}")
@@ -138,7 +186,7 @@ def main() -> int:
             exit_code = max(exit_code, 65)
             continue
         path = root / filename
-        text = canonical(records)
+        text = canonical(records, columns)
         if path.is_file() and path.read_text(encoding="utf-8") == text:
             print(f"{filename}: up to date")
             meta.setdefault(filename, now)  # backfill a lost stamp only

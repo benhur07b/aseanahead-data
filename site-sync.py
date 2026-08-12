@@ -7,12 +7,14 @@
 # ///
 """Refresh the website's offline fallback data files from this repo's CSVs.
 
-For each site JS data file given (by default progress.js and progress-reach.js
-in a sibling checkout of the website), locates its window.<NAME>_CSV backtick
-block, replaces it with the validated contents of this repo's matching CSV
-(PROGRESS → progress.csv), and sets window.<NAME>_UPDATED to that CSV's
-meta.json stamp—the UTC time the data last changed. Nothing else in the
-files is touched, so their comments and source switches survive every sync.
+For each site JS data file given (by default progress.js, progress-reach.js,
+and events.js in a sibling checkout of the website), locates its
+window.<NAME>_CSV backtick block, replaces it with the validated contents of
+this repo's matching CSV (PROGRESS → progress.csv), and sets
+window.<NAME>_UPDATED to that CSV's meta.json stamp—the UTC time the data
+last changed. Each <NAME> is validated by its own contract (beneficiary
+counts or event schedule). Nothing else in the files is touched, so their
+comments and source switches survive every sync.
 
 No network: the committed CSVs, already validated by sync.py before every
 commit, are the source of truth here. Run after a sync lands to keep the
@@ -39,19 +41,29 @@ import json
 import re
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 GENDERS = ("female", "male", "others")
-COLUMNS = ("category", *GENDERS)
+COUNT_COLUMNS = ("category", *GENDERS)
+EVENT_COLUMNS = ("date", "time", "title", "modality", "venue", "city", "host", "register_url", "notes")
+MODALITIES = ("Webinar", "In-person", "Hybrid", "Self-paced")
+
+# window.<NAME>_CSV → this repo's <name>.csv, validated by the named contract.
+CONTRACTS = {
+    "PROGRESS": ("counts", COUNT_COLUMNS),
+    "REACH": ("counts", COUNT_COLUMNS),
+    "EVENTS": ("events", EVENT_COLUMNS),
+}
 
 DATA_DIR = Path(__file__).resolve().parent
 DEFAULT_JS_FILES = [
     DATA_DIR.parent / "aseanahead/static/assets/js" / f
-    for f in ("progress.js", "progress-reach.js")
+    for f in ("progress.js", "progress-reach.js", "events.js")
 ]
 
 app = typer.Typer(add_completion=False)
@@ -65,6 +77,8 @@ def info(msg: str) -> None:
 class Panel:
     path: Path
     name: str            # e.g. PROGRESS—from the file's window.<NAME>_CSV block
+    contract: str        # validator key in VALIDATORS
+    columns: tuple[str, ...]
     text: str            # current file content
     csv: str             # current CSV block content
     stamp: str           # current <NAME>_UPDATED value
@@ -81,6 +95,9 @@ def load_panel(path: Path, data_dir: Path, meta: dict[str, str]) -> Panel | str:
     if len(blocks) != 1:
         return f"{path.name}: expected exactly one window.<NAME>_CSV backtick block, found {len(blocks)}"
     name, block = blocks[0]
+    if name not in CONTRACTS:
+        return f"{path.name}: no contract for window.{name}_CSV (known: {', '.join(CONTRACTS)})"
+    contract, columns = CONTRACTS[name]
     stamp = re.search(rf"window\.{name}_UPDATED\s*=\s*'([^']*)'", text)
     if not stamp:
         return f"{path.name}: window.{name}_UPDATED declaration not found (add it next to {name}_CSV)"
@@ -89,48 +106,94 @@ def load_panel(path: Path, data_dir: Path, meta: dict[str, str]) -> Panel | str:
         return f"{path.name}: no {data_path.name} in {data_dir} for window.{name}_CSV"
     if data_path.name not in meta:
         return f"{data_path.name}: no stamp in meta.json (run sync.py first)"
-    return Panel(path, name, text, block, stamp.group(1), data_path, meta[data_path.name])
+    return Panel(path, name, contract, columns, text, block, stamp.group(1),
+                 data_path, meta[data_path.name])
 
 
-def validate(csv_text: str, allow_zero: bool) -> list[str]:
-    """Mirror index.html's row validation; return a list of problems (empty = valid)."""
-    rows = [r for r in csv.reader(io.StringIO(csv_text)) if any(f.strip() for f in r)]
-    if not rows:
+def records_of(csv_text: str) -> list[list[str]]:
+    return [r for r in csv.reader(io.StringIO(csv_text)) if any(f.strip() for f in r)]
+
+
+def header_problems(records: list[list[str]], columns: tuple[str, ...]) -> list[str]:
+    if not records:
         return ["file has no rows"]
-    header = [h.strip().lower() for h in rows[0]]
-    missing = [c for c in COLUMNS if c not in header]
+    header = [h.strip().lower() for h in records[0]]
+    missing = [c for c in columns if c not in header]
     if missing:
         return [f"header is missing the {', '.join(missing)} column(s), got: {', '.join(header)}"]
-    problems: list[str] = []
-    total = 0
-    for line_no, record in enumerate(rows[1:], start=2):
+    return []
+
+
+def rows_of(records: list[list[str]]):
+    """Yield (line_no, row-dict) per record; None for width-mismatched rows."""
+    header = [h.strip().lower() for h in records[0]]
+    for line_no, record in enumerate(records[1:], start=2):
         if len(record) != len(header):
-            problems.append(f"line {line_no}: expected {len(header)} columns, got {len(record)}")
+            yield line_no, None
+        else:
+            yield line_no, dict(zip(header, (f.strip() for f in record)))
+
+
+def validate_counts(records: list[list[str]], allow_zero: bool) -> list[str]:
+    """Mirror index.html's row validation; return a list of problems (empty = valid)."""
+    if problems := header_problems(records, COUNT_COLUMNS):
+        return problems
+    total = 0
+    for line_no, r in rows_of(records):
+        if r is None:
+            problems.append(f"line {line_no}: expected {len(records[0])} columns, got a different count")
             continue
-        r = dict(zip(header, (f.strip() for f in record)))
         if not r["category"]:
             problems.append(f"line {line_no}: missing category")
-        for k in GENDERS:
-            if not re.fullmatch(r"\d+", r[k]):
-                problems.append(f'line {line_no}: {k} must be a whole number, got "{r[k]}"')
+        for g in GENDERS:
+            if not re.fullmatch(r"\d+", r[g]):
+                problems.append(f'line {line_no}: {g} must be a whole number, got "{r[g]}"')
             else:
-                total += int(r[k])
+                total += int(r[g])
     if not problems and total == 0 and not allow_zero:
         problems.append("every count is zero (use --allow-zero to write it anyway)")
     return problems
 
 
-def normalize(csv_text: str) -> str:
+def validate_events(records: list[list[str]], allow_zero: bool) -> list[str]:
+    """Mirror join.html's row validation; allow_zero has no meaning for events."""
+    if problems := header_problems(records, EVENT_COLUMNS):
+        return problems
+    for line_no, r in rows_of(records):
+        if r is None:
+            problems.append(f"line {line_no}: expected {len(records[0])} columns, got a different count")
+            continue
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", r["date"]) or not valid_date(r["date"]):
+            problems.append(f'line {line_no}: bad date "{r["date"]}" (need YYYY-MM-DD)')
+        if r["modality"] not in MODALITIES:
+            problems.append(f'line {line_no}: bad modality "{r["modality"]}" (need {" | ".join(MODALITIES)})')
+        if not r["title"]:
+            problems.append(f"line {line_no}: missing title")
+    return problems
+
+
+def valid_date(s: str) -> bool:
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        return False
+    return True
+
+
+VALIDATORS = {"counts": validate_counts, "events": validate_events}
+
+
+def normalize(csv_text: str, columns: tuple[str, ...]) -> str:
     """Canonical block content: only the contract columns, in contract order,
     LF endings, one trailing newline."""
-    records = [r for r in csv.reader(io.StringIO(csv_text)) if any(f.strip() for f in r)]
+    records = records_of(csv_text)
     header = [h.strip().lower() for h in records[0]]
-    at = {c: header.index(c) for c in COLUMNS}
+    at = {c: header.index(c) for c in columns}
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\n")
-    writer.writerow(COLUMNS)
+    writer.writerow(columns)
     for record in records[1:]:
-        writer.writerow([record[at[c]].strip() for c in COLUMNS])
+        writer.writerow([record[at[c]].strip() for c in columns])
     return out.getvalue()
 
 
@@ -204,14 +267,14 @@ def main(
     exit_code = 0
     for panel in panels:
         data_text = panel.data_path.read_text(encoding="utf-8")
-        problems = validate(data_text, allow_zero)
+        problems = VALIDATORS[panel.contract](records_of(data_text), allow_zero)
         if problems:
             for p in problems:
                 info(f"error: {panel.data_path.name}: {p}")
             info(f"{panel.path.name}: repo data rejected; file left untouched")
             exit_code = max(exit_code, 65)
             continue
-        new_csv = normalize(data_text)
+        new_csv = normalize(data_text, panel.columns)
         if new_csv == panel.csv and panel.new_stamp == panel.stamp:
             print(f"{panel.path.name}: up to date")
             continue

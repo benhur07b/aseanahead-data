@@ -1,10 +1,11 @@
 # ASEAN AHEAD — programme data
 
 Live data for the [ASEAN AHEAD Guide](https://aseanahead.bnhr.xyz) homepage
-progress panels. A scheduled workflow pulls the published Google Sheets,
-validates them, and commits `progress.csv` and `reach.csv`; the website reads
-those files from this repo's raw URLs. Invalid sheet data is never committed,
-so the site only ever sees data that passed the contract below.
+progress panels and the join-page event schedule. A scheduled workflow pulls
+the published Google Sheets, validates each against its contract, and commits
+`progress.csv`, `reach.csv`, and `events.csv`; the website reads those files
+from this repo's raw URLs. Invalid sheet data is never committed, so the site
+only ever sees data that passed the contracts below.
 
 ## Files
 
@@ -12,11 +13,12 @@ so the site only ever sees data that passed the contract below.
 |---|---|
 | `progress.csv` | Verified course **completions** per beneficiary category and gender |
 | `reach.csv` | **Course takers** (started, completed or not) per beneficiary category and gender |
+| `events.csv` | The **event schedule** shown on join.html |
 | `meta.json` | Per-file freshness: maps each CSV's filename to the UTC time (ISO-8601, `Z` suffix) its contents last changed |
 
-## The contract (frozen)
+## The count contract (frozen)
 
-Both files use exactly this header, in this order:
+`progress.csv` and `reach.csv` use exactly this header, in this order:
 
 ```
 category,female,male,others
@@ -37,10 +39,26 @@ category,female,male,others
   timestamp always describes the published file—and a date that stops
   advancing means the numbers are old, not that the pipeline is healthy
 
-**This format must not change.** The website validates against the same rules
-on read (`index.html`) and `site-sync.py` here refreshes the site's offline
-fallback from these files. If a change ever becomes unavoidable, the
-consuming site must be updated first, then this repo—never the reverse.
+## The events contract (frozen)
+
+`events.csv` uses exactly this header, in this order:
+
+```
+date,time,title,modality,venue,city,host,register_url,notes
+```
+
+- `date` — YYYY-MM-DD and a real calendar date; the Self-paced row's date is
+  the programme end date (the site renders it as "Open" until then)
+- `modality` — one of `Webinar | In-person | Hybrid | Self-paced`
+- `title` — never empty
+- `register_url` — empty means the site shows "Registration TBA"
+- All other columns are free text; fields containing commas are quoted
+
+**These formats must not change.** The website validates against the same
+rules on read (`index.html` / `join.html`) and `site-sync.py` here refreshes
+the site's offline fallbacks from these files. If a change ever becomes
+unavoidable, the consuming site must be updated first, then this repo—never
+the reverse.
 
 ## How it syncs
 

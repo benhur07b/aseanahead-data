@@ -28,12 +28,12 @@ jobs:
       - name: Commit updated data
         if: ${{ !cancelled() }}
         run: |
-          if git diff --quiet progress.csv reach.csv meta.json; then
+          if git diff --quiet progress.csv reach.csv events.csv meta.json; then
             echo "No data changes."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add progress.csv reach.csv meta.json
+          git add progress.csv reach.csv events.csv meta.json
           git commit -m "data: sync from Google Sheets"
           git push

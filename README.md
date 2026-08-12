@@ -38,8 +38,8 @@ category,female,male,others
   advancing means the numbers are old, not that the pipeline is healthy
 
 **This format must not change.** The website validates against the same rules
-on read (`index.html`) and its `tools/progress-sync.py` refreshes the site's
-offline fallback from these files. If a change ever becomes unavoidable, the
+on read (`index.html`) and `site-sync.py` here refreshes the site's offline
+fallback from these files. If a change ever becomes unavoidable, the
 consuming site must be updated first, then this repo—never the reverse.
 
 ## How it syncs
@@ -53,6 +53,23 @@ Run locally: `python3 sync.py`
 
 Exit codes: `0` synced, `65` sheet data violates the contract, `69` sheet
 unreachable (retriable).
+
+## Refreshing the website's fallback
+
+`site-sync.py` (needs [uv](https://docs.astral.sh/uv/)) copies the committed
+CSVs into the website's offline fallback data files and sets each file's
+`window.<NAME>_UPDATED` to the `meta.json` stamp, so the site's numbers and
+its freshness note can never disagree with this repo. No network involved.
+
+```
+uv run site-sync.py                        # sibling ../aseanahead checkout
+uv run site-sync.py path/to/progress.js    # explicit file(s)
+uv run site-sync.py --dry-run              # preview, write nothing
+```
+
+Each JS file's `window.<NAME>_CSV` block names its source here (`PROGRESS` →
+`progress.csv`). Exit codes: `0` synced, `2` pre-flight failure, `65` a repo
+CSV violates the contract.
 
 ## Maintenance notes
 

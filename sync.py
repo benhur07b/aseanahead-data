@@ -9,6 +9,11 @@ fetch or validation failure the existing file is left untouched and the
 exit code reports the failure, so the workflow run shows red while the
 last-known-good data stays published.
 
+meta.json maps each data file to the UTC time its contents last changed
+(granularity: one sync interval). A failed sync never touches a file's
+entry—the timestamp always describes the published CSV next to it, and a
+date that stops advancing is the visible sign the numbers are old.
+
 Exit codes:
   0   all sheets synced (written or already up to date)
   65  a sheet returned data that violates the contract
@@ -19,10 +24,12 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 FETCH_TIMEOUT_S = 60
@@ -37,8 +44,23 @@ SHEETS = (
 )
 
 
+META = "meta.json"
+
+
 def info(msg: str) -> None:
     print(msg, file=sys.stderr)
+
+
+def load_meta(path: Path) -> dict[str, str]:
+    # A missing or malformed meta.json is rebuilt from this run's stamps
+    # rather than aborting the sync—the CSVs are the data, this is bookkeeping.
+    try:
+        meta = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if isinstance(meta, dict) and all(isinstance(v, str) for v in meta.values()):
+        return meta
+    return {}
 
 
 def fetch(url: str) -> str:
@@ -96,6 +118,9 @@ def canonical(records: list[list[str]]) -> str:
 
 
 def main() -> int:
+    root = Path(__file__).resolve().parent
+    meta = load_meta(root / META)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     exit_code = 0
     for filename, url in SHEETS:
         try:
@@ -112,13 +137,21 @@ def main() -> int:
             info(f"{filename}: sheet data rejected; file left untouched")
             exit_code = max(exit_code, 65)
             continue
-        path = Path(__file__).resolve().parent / filename
+        path = root / filename
         text = canonical(records)
         if path.is_file() and path.read_text(encoding="utf-8") == text:
             print(f"{filename}: up to date")
+            meta.setdefault(filename, now)  # backfill a lost stamp only
         else:
             path.write_text(text, encoding="utf-8")
+            meta[filename] = now
             print(f"{filename}: updated")
+
+    meta_text = json.dumps(dict(sorted(meta.items())), indent=2) + "\n"
+    meta_path = root / META
+    if not meta_path.is_file() or meta_path.read_text(encoding="utf-8") != meta_text:
+        meta_path.write_text(meta_text, encoding="utf-8")
+        print(f"{META}: updated")
     return exit_code
 
 

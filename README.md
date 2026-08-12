@@ -12,6 +12,7 @@ so the site only ever sees data that passed the contract below.
 |---|---|
 | `progress.csv` | Verified course **completions** per beneficiary category and gender |
 | `reach.csv` | **Course takers** (started, completed or not) per beneficiary category and gender |
+| `meta.json` | Per-file freshness: maps each CSV's filename to the UTC time (ISO-8601, `Z` suffix) its contents last changed |
 
 ## The contract (frozen)
 
@@ -31,6 +32,10 @@ category,female,male,others
   snapshot from Google, not real data
 - There is deliberately **no target column**: the programme target is a
   page-level constant on the website, not part of the data
+- `meta.json` timestamps move only when the CSV next to them changes
+  (granularity: one sync interval). A failed sync touches neither, so a
+  timestamp always describes the published file—and a date that stops
+  advancing means the numbers are old, not that the pipeline is healthy
 
 **This format must not change.** The website validates against the same rules
 on read (`index.html`) and its `tools/progress-sync.py` refreshes the site's
@@ -40,9 +45,9 @@ consuming site must be updated first, then this repo—never the reverse.
 ## How it syncs
 
 `.github/workflows/sync.yml` runs `sync.py` (Python stdlib only) every
-hour and on manual dispatch, committing only when validated data changed.
-On fetch failure or contract violations the run fails visibly and the
-last-known-good CSVs stay published.
+15 minutes and on manual dispatch, committing only when validated data
+changed. On fetch failure or contract violations the run fails visibly
+and the last-known-good CSVs stay published.
 
 Run locally: `python3 sync.py`
 
@@ -55,5 +60,5 @@ unreachable (retriable).
   repository activity—watch for the re-enable email, or re-enable under
   Actions → Sync sheet data.
 - raw.githubusercontent.com caches for ~5 minutes; total staleness is the
-  cron interval plus that.
+  cron interval plus that (~20 minutes worst case).
 - The source sheet URLs live at the top of `sync.py`.
